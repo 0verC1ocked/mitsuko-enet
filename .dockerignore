@@ -1,0 +1,10 @@
+server.h.gch
+build
+logs
+deployment
+scripts
+.dockerignore
+dockerfiles
+jenkins
+k8s
+helm-values

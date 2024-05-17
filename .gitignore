@@ -1,0 +1,16 @@
+.vscode/*
+!.vscode/c_cpp_properties.json
+!.vscode/launch.json
+!.vscode/tasks.json
+build
+csharp
+dumps
+.cache
+
+# Precompiled Headers
+*.gch
+*.pch
+logs
+
+# Dev test folder
+local
