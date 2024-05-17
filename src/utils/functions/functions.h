@@ -1,5 +1,5 @@
 #pragma once
 #include <string>
-#include "../../../../payload-builder/proto/payload.pb.h"
+#include "../../../lib/payloadbuilder/src/proto/payload.pb.h"
 
 extern std::string getEventString(PAYLOAD::Events event);
