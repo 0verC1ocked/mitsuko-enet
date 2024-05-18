@@ -4,9 +4,13 @@ BUILD_DIR := ./build
 OBJ_DIR := $(BUILD_DIR)/obj
 SRC_DIR := ./src
 INC_DIR := ./inc
-LIBS := -lprotobuf -lpthread -lzmq -lenet 
+LIBS := -lprotobuf -lpthread -lzmq -lenet
 
-DEPS_LIB := lib/payloadbuilder/build/libpayloadbuilder.a
+# Find all submodule directories
+SUBMODULE_DIRS := $(shell find lib -maxdepth 1 -mindepth 1 -type d)
+
+# Define a variable for the static libraries
+DEPS_LIBS := $(foreach dir,$(SUBMODULE_DIRS),$(dir)/build/lib$(notdir $(dir)).a)
 
 PCH_FILENAME = $(SRC_DIR)/server.h
 PCH = $(SRC_DIR)/$(PCH_FILENAME).gch
@@ -14,11 +18,11 @@ PCH = $(SRC_DIR)/$(PCH_FILENAME).gch
 EXECUTABLE := server
 
 HEADERS := $(shell find $(INC_DIR) -name '*.h' -or -name '*.hpp')
-SRCS := $(shell find $(SRC_DIR) -name '*.cpp' -or -name '*.c' -or -name "*.cc" -or -name '*.s')
+SRCS := $(shell find $(SRC_DIR) -name '*.cpp' -or -name '*.c' -or -name '*.cc' -or -name '*.s')
 OBJS := $(SRCS:%=$(OBJ_DIR)/%.o)
 DEPS := $(OBJS:.o=.d)
 
-LDFLAGS := -Llib/payloadbuilder/build -lpayloadbuilder
+LDFLAGS := $(foreach dir,$(SUBMODULE_DIRS),-L$(dir)/build -l$(notdir $(dir)))
 
 CPPFLAGS := $(INC_FLAGS) -MMD -MP
 CXXFLAGS += -std=c++17 -w # Add -g flag for debug information
@@ -31,15 +35,23 @@ sanitize: CXXFLAGS += -g -ggdb3 -fsanitize=address
 sanitize: $(BUILD_DIR)/$(EXECUTABLE)
 
 release: CXXFLAGS += -O3 -fsanitize=address
-release: $(DEPS_LIB) $(BUILD_DIR)/$(EXECUTABLE)
+release: $(DEPS_LIBS) $(BUILD_DIR)/$(EXECUTABLE)
 
 releasedb: CXXFLAGS += -g -ggdb3 -O3
 releasedb: $(BUILD_DIR)/$(EXECUTABLE)
 
-$(DEPS_LIB):
-	cd lib/payloadbuilder && $(MAKE) release
+$(BUILD_DIR):
+	mkdir -p $@
 
-$(BUILD_DIR)/$(EXECUTABLE): $(PCH) $(OBJS) $(DEPS_LIB) | $(BUILD_DIR)
+# Rule to build each static library
+define build_static_lib
+	$(MAKE) -C $(1) release
+endef
+
+$(DEPS_LIBS):
+	$(foreach dir,$(SUBMODULE_DIRS),$(call build_static_lib,$(dir)))
+
+$(BUILD_DIR)/$(EXECUTABLE): $(PCH) $(OBJS) $(DEPS_LIBS) | $(BUILD_DIR)
 	@echo "Linking..."
 	clang++ $(OBJS) $(LIBS) -o $@ $(LDFLAGS) $(CXXFLAGS) -v
 
@@ -57,10 +69,12 @@ $(PCH): $(HEADERS)
 	@echo "Building Precompiled Header..."
 	clang++ $(CXXFLAGS) -I $(INC_DIR) -I $(SRC_DIR) -x c++-header $(PCH_FILENAME)
 
-
 clean:
 	rm -r $(BUILD_DIR)
 
 cleanall:
 	rm -r $(BUILD_DIR)
-	cd lib/payloadbuilder && $(MAKE) clean
+	$(foreach dir,$(SUBMODULE_DIRS), \
+		$(MAKE) -C $(dir) clean; \
+	)
+
