@@ -2,6 +2,7 @@
 
 #include "../../inc/enet.h"
 #include "../../inc/zmq.hpp"
+#include "../../lib/payloadbuilder/inc/payload-builder.h"
 #include <chrono>
 #include <string>
 
@@ -17,7 +18,8 @@ public:
     void destroyENetHost();
     void run(uint32_t timeout);
 
-    bool queueData(std::string &serializedMessage, zmq::socket_t &publisher);
+    bool queueData(const std::string &serializedMessage);
+    void publishData();
 
     static bool enetPeerSend(ENetPeer* peer, uint8_t channel, ENetPacket* packet);
   
@@ -26,6 +28,8 @@ public:
     long get_loop_elapsed_time();
     bool m_running{ false };
     ENetHost* server;
+protected:
+    std::unordered_map<std::string, ENetPeer*> m_peers;
 private:
     ENetPeer* relay_peer;
     in6_addr ipv6;
@@ -33,7 +37,16 @@ private:
     ENetAddress address;
     static UdpManager* udpManagerInstance;
     std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds> loop_start;
+    zmq::socket_t publisher;
+
+    zmq::socket_t subscriber;
+    
+
+    std::vector<std::string> m_pub_queue;
+    std::vector<zmq::message_t> read_buffer;
     void Initialize();
+
+    void processMessages(PayloadBuilder& pb, zmq::pollitem_t* items);
 };
 
 enum PeerType : uint32_t {

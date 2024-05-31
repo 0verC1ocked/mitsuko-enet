@@ -67,16 +67,34 @@ void UdpManager::destroyENetHost() {
 
 void UdpManager::run(uint32_t timeout) {
     ENetEvent event;
-    zmq::context_t context(1);
-    zmq::socket_t publisher(context, ZMQ_PUB);
+    zmq::context_t pub_context(1);
+    publisher = zmq::socket_t(pub_context, ZMQ_PUB);
     publisher.bind("tcp://*:5555");
+    
+
+    zmq::context_t sub_context(2);
+    subscriber = zmq::socket_t(sub_context, ZMQ_SUB);
+    subscriber.connect("tcp://localhost:6666");
+    
+
+    zmq::pollitem_t items[] = {
+        {static_cast<void*>(subscriber), 0, ZMQ_POLLIN, 0}
+    };
+
+
+    subscriber.setsockopt(ZMQ_SUBSCRIBE, "", 0);
+
+   
+
 
     while (m_running) {
         {
             reset_loop_start();
+            PayloadBuilder pb;
+            processMessages(pb, items);
             while (enet_host_service(UdpManager::getUdpManager()->server, &event, timeout) > 0) {
                 try {
-                    PayloadBuilder pb;
+                    
                     switch (event.type) {
                     case ENET_EVENT_TYPE_CONNECT:
                     {
@@ -89,7 +107,7 @@ void UdpManager::run(uint32_t timeout) {
                         pinfo->port = event.peer->address.port;
                         pinfo->type = static_cast<PeerType>(event.data);
                         event.peer->data = (void*)(pinfo);
-
+                        Logger::Log(INFO, "Connected - " + std::to_string(event.peer->address.ipv6.__in6_u.__u6_addr32[0]) + ":" + std::to_string(event.peer->address.port), 8);
                         if (event.data == PeerType::Client) {
                             Logger::Log(INFO, "A new client connected - host: " + pinfo->address + ", port: " + std::to_string(pinfo->port), 8);
                             PAYLOAD::Payload* payload = pb.newPayload();
@@ -111,32 +129,55 @@ void UdpManager::run(uint32_t timeout) {
                     case ENET_EVENT_TYPE_RECEIVE:
                     {   
                         if (((PeerInfo*)event.peer->data)->type == PeerType::Client) {
+                            
+
                             PAYLOAD::Payload* receivedPayload = pb.newPayload();
                             receivedPayload->ParseFromArray(event.packet->data, event.packet->dataLength);
                             Logger::Log(INFO, "Received " + getEventString(receivedPayload->event()) + " from " + std::string(receivedPayload->data().userid()) + ":" + std::to_string(((PeerInfo*)event.peer->data)->port) + " in room " + std::string(receivedPayload->data().roomid()));
-                            //Gameloop stuff
                             if (receivedPayload->event() == PAYLOAD::Events::CONNECT_ACK) {
                                 ((PeerInfo*)event.peer->data)->roomId = receivedPayload->data().roomid();
                                 ((PeerInfo*)event.peer->data)->userId = receivedPayload->data().userid();
+                                
+                                m_peers[receivedPayload->data().userid()] = event.peer;
                             }
 
-                            std::string serializedData = receivedPayload->SerializeAsString();
+                            IPC::IPCMessageType ipcMessageType = IPC::IPCMessageType::IPC_NONE;
 
-                            UdpManager::getUdpManager()->queueData(serializedData, publisher);
+                            if (receivedPayload->event() == PAYLOAD::Events::CONNECT_ACK || receivedPayload->event() == PAYLOAD::Events::DISCONNECT || receivedPayload->event() == PAYLOAD::Events::CHAT_EMOJI || receivedPayload->event() == PAYLOAD::Events::MESSAGE || receivedPayload->event() == PAYLOAD::Events::FORFIET_MATCH) {
+                                ipcMessageType = IPC::IPCMessageType::IPC_P0_MATCH_REQUEST;
+                            } else {
+                                ipcMessageType = IPC::IPCMessageType::IPC_P1_MATCH_REQUEST;
+                            } 
+
+                            IPC::IPCMessage* ipcMessage = pb.newIPCMessage();
+
+                            ipcMessage->set_type(ipcMessageType);
+                            ipcMessage->set_matchid(receivedPayload->data().roomid());
+                            ipcMessage->set_data(receivedPayload->SerializeAsString());
+
+                            std::string serializedData = ipcMessage->SerializeAsString();
+
+                            UdpManager::getUdpManager()->queueData(serializedData);
 
 
                         } else if (((PeerInfo*)event.peer->data)->type == PeerType::RelayService) {
-                            Logger::Log(INFO, "Received " + std::to_string(event.packet->dataLength) + " bytes from RelayService");
+                            IPC::IPCMessage* ipcMessage = pb.newIPCMessage();
+                            ipcMessage->set_type(IPC::IPCMessageType::IPC_CREATE_MATCH_REQUEST);
+                            ipcMessage->set_data(event.packet->data, event.packet->dataLength);
+                            std::string serializedData = ipcMessage->SerializeAsString();
+                            UdpManager::getUdpManager()->queueData(serializedData);
                         }
                         enet_packet_destroy(event.packet);
                         break;
                     }
                     case ENET_EVENT_TYPE_DISCONNECT:
                     {
-                        Logger::Log(INFO, "Disconnected - " + std::to_string(event.peer->address.ipv6.__in6_u.__u6_addr32[0]) + ":" + std::to_string(event.peer->address.port), 8);
+                        Logger::Log(INFO, "Disconnected - " + ((PeerInfo*)event.peer->data)->userId + " on room " + ((PeerInfo*)event.peer->data)->roomId);
                         if (((PeerInfo*)event.peer->data)->type == PeerType::Client) {
                             const std::string roomId = ((PeerInfo*)event.peer->data)->roomId;
                             const std::string userId = ((PeerInfo*)event.peer->data)->userId;
+
+                            m_peers.erase(userId);
                             
                         } else {
                             Logger::Log(INFO, "Skipping disconnect action since its not a client", 8);
@@ -149,10 +190,13 @@ void UdpManager::run(uint32_t timeout) {
                     }
                     case ENET_EVENT_TYPE_DISCONNECT_TIMEOUT:
                     {
-                        Logger::Log(INFO, "Disconnected due to timeout - " + std::to_string(event.peer->address.ipv6.__in6_u.__u6_addr32[0]) + ":" + std::to_string(event.peer->address.port), 8);
+                        
+                        Logger::Log(INFO, "Disconnected due to timeout - " + ((PeerInfo*)event.peer->data)->userId + " on room " + ((PeerInfo*)event.peer->data)->roomId);
                         if (((PeerInfo*)event.peer->data)->type == PeerType::Client) {
                             const std::string roomId = ((PeerInfo*)event.peer->data)->roomId;
                             const std::string userId = ((PeerInfo*)event.peer->data)->userId;
+
+                            m_peers.erase(userId);
                             
                         } else {
                             Logger::Log(INFO, "Skipping disconnect action since its not a client", 8);
@@ -173,7 +217,7 @@ void UdpManager::run(uint32_t timeout) {
                     Logger::Log(ERROR, e.what());
                 }
             }
-            
+            publishData();
         }
     }
     UdpManager::getUdpManager()->destroyENetHost();
@@ -196,15 +240,71 @@ long UdpManager::get_loop_elapsed_time() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - loop_start).count();
 }
 
-bool UdpManager::queueData(std::string& serializedMessage, zmq::socket_t& publisher) {
+bool UdpManager::queueData(const std::string& serializedMessage) {
     try {
-        zmq::message_t payload(serializedMessage.size());
-        std::copy(serializedMessage.begin(), serializedMessage.end(), static_cast<char*>(payload.data()));
-        publisher.send(payload, zmq::send_flags::none);
-        Logger::Log(INFO, "Payload published to subscribers");
+        m_pub_queue.push_back(serializedMessage);
         return true;
     } catch (std::exception& e) {
         Logger::Log(ERROR, e.what());
         return false;
     }
+}
+
+void UdpManager::publishData() {
+    try {
+        for (auto& message : m_pub_queue) {
+            zmq::message_t msg(message.size());
+            memcpy(msg.data(), message.c_str(), message.size());
+            publisher.send(msg);
+            
+            Logger::Log(INFO, "Payload published to subscribers");
+        }
+        m_pub_queue.clear();
+    } catch (std::exception& e) {
+        Logger::Log(ERROR, e.what());
+    }
+}
+
+void UdpManager::processMessages(PayloadBuilder& pb, zmq::pollitem_t* items) {
+    try {
+        
+        zmq::poll(&items[0], 1, std::chrono::milliseconds(1000));
+        if (items[0].revents & ZMQ_POLLIN) {
+            zmq::message_t message;
+            if (subscriber.recv(message)) {
+                read_buffer.push_back(std::move(message));
+            }
+        }
+
+        for (const zmq::message_t& message : read_buffer) {
+            IPC::IPCMessage* ipcMessage =  pb.newIPCMessage();
+            ipcMessage->ParseFromArray(message.data(), message.size());
+            Logger::Log(DEBUG, "Received -> " + ipcMessage->ShortDebugString());
+            ENetPeer* peer = m_peers[ipcMessage->userid()];
+            if (peer == nullptr) {
+                Logger::Log(ERROR, "Peer not found");
+                return;
+            }
+            switch (ipcMessage->type()) {
+                case IPC::IPCMessageType::IPC_ENET_SEND: {
+                    ENetPacket* packet = enet_packet_create(reinterpret_cast<const uint8_t*>(ipcMessage->data().data()), ipcMessage->data().size(), ENET_PACKET_FLAG_RELIABLE);
+                    enetPeerSend(peer, 0, packet);
+                    Logger::Log(INFO, "ENet packet sent to peer");
+                    break;
+                }
+                case IPC::IPCMessageType::IPC_ENET_STREAM: {
+                    break;
+                }
+                default: {
+                    Logger::Log(ERROR, "Unknown IPC message type");
+                    break;
+                }
+            }
+        }
+
+        read_buffer.clear();
+    } catch (const std::exception& e) {
+        Logger::Log(ERROR, e.what());
+    }
+
 }
